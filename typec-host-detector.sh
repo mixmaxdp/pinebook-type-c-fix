@@ -136,7 +136,7 @@ while true; do
             log "charger disconnected, probing for devices in ${PROBE_DELAY}s"
             sleep "$PROBE_DELAY"
             if ! is_charger_connected; then
-                probe_for_devices
+                probe_for_devices || true
             fi
         elif [ "$last_charger" = "no" ]; then
             if has_external_usb_device && module_loaded; then
@@ -154,7 +154,7 @@ while true; do
         else
             sleep "$PROBE_DELAY"
             if ! is_charger_connected; then
-                probe_for_devices
+                probe_for_devices || true
             fi
             last_device_check=$now
         fi
