@@ -17,6 +17,23 @@ PROBE_DELAY=3
 PROBE_HOLD=4
 PROBE_RETRY=30
 
+# USB-C DWC3 controller on RK3399
+USB_C_CONTROLLER="fe800000.usb"
+
+# Find which bus number corresponds to the USB-C controller
+get_usbc_bus_num() {
+    for d in /sys/bus/usb/devices/usb[0-9]*; do
+        local target
+        target=$(readlink -f "$d" 2>/dev/null || echo "")
+        case "$target" in
+            *"$USB_C_CONTROLLER"*) basename "$d" | sed 's/usb//'; return 0 ;;
+        esac
+    done
+    echo ""
+}
+
+USB_C_BUS=$(get_usbc_bus_num)
+
 log() {
     logger -t "typec-host-detector" "$@"
 }
@@ -44,7 +61,10 @@ is_charger_connected() {
 }
 
 get_device_set() {
-    lsusb 2>/dev/null | grep -v "Linux Foundation\|root hub" | awk '{print $6}' | sort -u || true
+    [ -z "$USB_C_BUS" ] && return
+    local bus_pad
+    bus_pad=$(printf "%03d" "$USB_C_BUS")
+    lsusb 2>/dev/null | grep "^Bus $bus_pad " | grep -v "Linux Foundation\|root hub" | awk '{print $6}' | sort -u || true
 }
 
 # Baseline captured at startup — devices present before any host mode probing
@@ -53,8 +73,10 @@ BASELINE_DEVICES=$(get_device_set)
 has_external_usb_device() {
     local current
     current=$(get_device_set)
+    [ -z "$current" ] && return 1
+    [ -z "$BASELINE_DEVICES" ] && return 0
     local new_devices
-    new_devices=$(comm -13 <(echo "$BASELINE_DEVICES") <(echo "$current"))
+    new_devices=$(comm -13 <(printf "%s\n" "$BASELINE_DEVICES") <(printf "%s\n" "$current"))
     [ -n "$new_devices" ]
 }
 
