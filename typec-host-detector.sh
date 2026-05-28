@@ -43,8 +43,19 @@ is_charger_connected() {
     [ "$mode" != "default" ]
 }
 
-has_any_usb_device() {
-    lsusb 2>/dev/null | grep -v "Linux Foundation\|root hub" | grep -q "."
+get_device_set() {
+    lsusb 2>/dev/null | grep -v "Linux Foundation\|root hub" | awk '{print $6}' | sort -u || true
+}
+
+# Baseline captured at startup — devices present before any host mode probing
+BASELINE_DEVICES=$(get_device_set)
+
+has_external_usb_device() {
+    local current
+    current=$(get_device_set)
+    local new_devices
+    new_devices=$(comm -13 <(echo "$BASELINE_DEVICES") <(echo "$current"))
+    [ -n "$new_devices" ]
 }
 
 enable_host() {
@@ -66,7 +77,7 @@ probe_for_devices() {
     enable_host
     sleep "$PROBE_HOLD"
 
-    if has_any_usb_device && ! is_charger_connected; then
+    if has_external_usb_device && ! is_charger_connected; then
         log "device detected, keeping host mode"
         return 0
     else
@@ -114,7 +125,7 @@ while true; do
             fi
         elif [ "$last_charger" = "no" ]; then
             # No charger, check existing state
-            if has_any_usb_device && module_loaded; then
+            if has_external_usb_device && module_loaded; then
                 # Device already present → keep host mode
                 if [ "$(cat $FORCE_HOST 2>/dev/null)" != "1" ]; then
                     enable_host
