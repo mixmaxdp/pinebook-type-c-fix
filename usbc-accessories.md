@@ -177,4 +177,5 @@ sudo ~/typec-force-host/reinstall.sh
 | `Makefile` | Module build file |
 | `typec-host-detector.sh` | Background auto-detection script |
 | `typec-host-detector.service` | Systemd unit |
-| `install.sh` | Build & install script |
+| `reinstall.sh` | Build & install script |
+| `.gitignore` | Ignore build artifacts |
