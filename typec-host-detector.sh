@@ -1,9 +1,12 @@
 #!/bin/bash
 # USB-C Host Detector for Pinebook Pro
-# Switches USB-C port to host mode (VBUS + extcon) when no PD source is
-# detected on CC lines. Probes for up to 30s to detect CC-less accessories,
-# then retries every 10s. Disables host mode immediately when PD activity
-# resumes.
+#
+# Keeps host mode (VBUS + extcon) active whenever no PD source is detected on
+# CC lines. This allows CC-less USB-C accessories (e.g. Jabra EVOLVE 20 headset)
+# to receive power and enumerate at their own pace.
+#
+# When a PD source (charger/dock) appears, disables host mode so the TCPM can
+# negotiate power delivery normally.
 
 MODULE_PATH="/usr/local/lib/typec-force-host/typec_force_host.ko"
 FORCE_HOST="/sys/kernel/typec_force_host/force_host"
@@ -12,22 +15,6 @@ TYPEC_PORT="/sys/bus/i2c/devices/4-0022/typec/port0"
 TYPEC_MODE="$TYPEC_PORT/power_operation_mode"
 
 POLL_INTERVAL=2
-PROBE_DELAY=3
-PROBE_HOLD=30
-PROBE_RETRY=10
-
-USB_C_CONTROLLER="fe800000.usb"
-
-get_usbc_bus_num() {
-    for d in /sys/bus/usb/devices/usb[0-9]*; do
-        local target
-        target=$(readlink -f "$d" 2>/dev/null || echo "")
-        case "$target" in
-            *"$USB_C_CONTROLLER"*) basename "$d" | sed 's/usb//'; return 0 ;;
-        esac
-    done
-    echo ""
-}
 
 log() {
     logger -t "typec-host-detector" "$@"
@@ -55,30 +42,10 @@ is_charger_connected() {
     [ "$mode" != "default" ]
 }
 
-get_device_set() {
-    local bus bus_pad
-    bus=$(get_usbc_bus_num)
-    [ -z "$bus" ] && return
-    bus_pad=$(printf "%03d" "$bus")
-    lsusb 2>/dev/null | grep "^Bus $bus_pad " | grep -v "Linux Foundation\|root hub" | awk '{print $6}' | sort -u || true
-}
-
-BASELINE_DEVICES=$(get_device_set)
-
-has_external_usb_device() {
-    local current
-    current=$(get_device_set)
-    [ -z "$current" ] && return 1
-    [ -z "$BASELINE_DEVICES" ] && return 0
-    local new_devices
-    new_devices=$(comm -13 <(printf "%s\n" "$BASELINE_DEVICES") <(printf "%s\n" "$current"))
-    [ -n "$new_devices" ]
-}
-
 enable_host() {
     if module_loaded && [ "$(cat $FORCE_HOST 2>/dev/null)" != "1" ]; then
         echo 1 > "$FORCE_HOST" 2>/dev/null
-        log "host mode enabled (VBUS + extcon)"
+        log "host mode enabled"
     fi
 }
 
@@ -98,41 +65,20 @@ disable_host() {
 load_module || log "module not available, continuing without"
 
 last_charger="unknown"
-host_start=0
-now=0
 
 log "started"
 
 while true; do
-    now=$(date +%s)
     charger=$(is_charger_connected && echo "yes" || echo "no")
 
     if [ "$charger" = "yes" ]; then
         [ "$last_charger" != "yes" ] && log "PD source detected (mode: $(cat $TYPEC_MODE 2>/dev/null))"
         disable_host
-        last_charger="yes"
     else
-        if [ "$last_charger" != "no" ]; then
-            log "no PD source, probing for devices"
-            enable_host
-            host_start=$now
-        fi
-
-        if has_external_usb_device; then
-            [ "$last_charger" != "no" ] && log "device detected"
-        else
-            elapsed=$(( now - host_start ))
-            if [ $elapsed -ge $PROBE_HOLD ]; then
-                disable_host
-                log "no device found after ${PROBE_HOLD}s, will retry in ${PROBE_RETRY}s"
-                sleep "$PROBE_RETRY"
-                last_charger="unknown"
-                continue
-            fi
-        fi
-
-        last_charger="no"
+        [ "$last_charger" != "no" ] && log "no PD source, enabling host mode"
+        enable_host
     fi
 
+    last_charger="$charger"
     sleep "$POLL_INTERVAL"
 done
