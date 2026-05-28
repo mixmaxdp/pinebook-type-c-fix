@@ -14,7 +14,7 @@ TYPEC_MODE="$TYPEC_PORT/power_operation_mode"
 
 POLL_INTERVAL=2
 PROBE_DELAY=3
-PROBE_HOLD=4
+PROBE_HOLD=2
 PROBE_RETRY=10
 
 # USB-C DWC3 controller on RK3399
@@ -94,6 +94,8 @@ disable_host() {
 }
 
 probe_for_devices() {
+    # Don't probe if a charger appeared since the last check
+    is_charger_connected && return 1
     # Briefly enable host mode to check if a device is connected
     enable_host
     sleep "$PROBE_HOLD"
