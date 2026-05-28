@@ -151,10 +151,10 @@ sudo insmod /usr/local/lib/typec-force-host/typec_force_host.ko
 sudo systemctl restart typec-host-detector
 ```
 
-Or use the reinstall script:
+Or use the install script:
 
 ```bash
-sudo ~/typec-force-host/reinstall.sh
+sudo ~/typec-force-host/install.sh
 ```
 
 ## Hardware Notes
@@ -177,5 +177,5 @@ sudo ~/typec-force-host/reinstall.sh
 | `Makefile` | Module build file |
 | `typec-host-detector.sh` | Background auto-detection script |
 | `typec-host-detector.service` | Systemd unit |
-| `reinstall.sh` | Build & install script |
+| `install.sh` | Build & install script |
 | `.gitignore` | Ignore build artifacts |
