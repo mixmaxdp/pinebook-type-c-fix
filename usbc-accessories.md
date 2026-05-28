@@ -38,7 +38,10 @@ DWC3 USB Controller
 A kernel module + userspace daemon that bypasses CC detection:
 
 1. **Kernel module** (`typec_force_host.ko`): writes to the typec-extcon and
-   controls the VBUS regulator directly, decoupled from the TCPM.
+   drives VBUS via direct GPIO control (GPIO1_A3 = GPIO 35), decoupled from
+   the TCPM. The GPIO is set using `gpio_set_value()` which bypasses the
+   `regulator-fixed` driver — the regulator framework's `regulator_enable()`
+   was found to return success but not actually drive the GPIO pin.
 2. **Systemd service** (`typec-host-detector.sh`): polls the port state and
    automatically enables/disables host mode based on PD activity.
 
@@ -48,7 +51,7 @@ All controls under `/sys/kernel/typec_force_host/`:
 
 | File | Purpose | Readback |
 |------|---------|----------|
-| `force_host` | Enable VBUS regulator + set EXTCON_USB_HOST | `1` or `0` |
+| `force_host` | Drive VBUS GPIO high + set EXTCON_USB_HOST | `1` or `0` |
 | `force_data_host` | Set EXTCON_USB_HOST only (no VBUS) | `1` or `0` |
 
 ### Detection Script: State Machine
@@ -131,7 +134,7 @@ journalctl -u typec-host-detector -f
 - Computes bus number dynamically (handles HCD registration timing)
 - Tracks baseline devices at startup; only *new* devices on the USB-C bus are
   considered external
-- PD active → disables host mode (clears extcon + VBUS regulator)
+- PD active → disables host mode (clears extcon + GPIO)
 - PD removed → waits 3s, probes host mode for 2s
 - Device appears → keeps host mode
 - No device → disables host, retries every 10s
@@ -140,17 +143,28 @@ journalctl -u typec-host-detector -f
 ## Rebuilding After Kernel Update
 
 ```bash
-cd typec-force-host
+cd ~/typec-force-host
 make
 sudo cp typec_force_host.ko /usr/local/lib/typec-force-host/
+sudo rmmod typec_force_host 2>/dev/null
+sudo insmod /usr/local/lib/typec-force-host/typec_force_host.ko
 sudo systemctl restart typec-host-detector
+```
+
+Or use the reinstall script:
+
+```bash
+sudo ~/typec-force-host/reinstall.sh
 ```
 
 ## Hardware Notes
 
 - **FUSB302** at I2C address 0x22 on the RK3399's I2C4 bus, driven by `typec_fusb302`
 - **DWC3** at address fe800000 on RK3399, `dr_mode = "otg"`, extcon = typec-extcon
-- **VBUS regulator** `vbus_5vout` is a GPIO-controlled regulator (active high)
+- **VBUS regulator** `vbus_5vout` is a GPIO-controlled regulator (GPIO1_A3 = GPIO 35, active high)
+- **GPIO issue**: `regulator_enable("vbus_5vout")` returns success but does **not** actually
+  drive GPIO1_A3 high on this kernel. The module works around this by calling
+  `gpio_set_value(35, 1)` directly, which does drive the pin.
 - **CDN-DP** handles DP alt mode routing; unaffected by the module
 - **Charging limitation**: PBP uses a linear charger (RK808 PMIC) with a single
   5V/2.5A sink PDO — hardware-limited to 5V input regardless of PD negotiation
