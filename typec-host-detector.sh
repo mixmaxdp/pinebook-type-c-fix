@@ -153,7 +153,9 @@ while true; do
                     enable_host
                 fi
             else
-                # No device, check if it's time to retry
+                # No device present → disable host mode if active
+                disable_host
+                # Check if it's time to retry
                 elapsed=$(( now - last_device_check ))
                 if [ $elapsed -ge $PROBE_RETRY ]; then
                     probe_for_devices || true
