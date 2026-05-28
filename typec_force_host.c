@@ -8,12 +8,24 @@
 #include <linux/extcon-provider.h>
 #include <linux/regulator/consumer.h>
 #include <linux/delay.h>
+#include <linux/of_gpio.h>
+#include <linux/gpio/consumer.h>
 
 static struct extcon_dev *typec_extcon;
 static struct regulator *vbus_reg;
 static struct kobject *typec_kobj;
 static bool force_host_active;
 static bool force_data_host_active;
+static int vbus_gpio = -1;
+
+static void set_vbus_gpio(int value)
+{
+	if (gpio_is_valid(vbus_gpio)) {
+		gpio_set_value(vbus_gpio, value);
+		pr_info("typec_force_host: vbus_gpio=%d value=%d (readback=%d)\n",
+			vbus_gpio, value, gpio_get_value(vbus_gpio));
+	}
+}
 
 static int force_host_mode(bool enable)
 {
@@ -43,8 +55,11 @@ static int force_host_mode(bool enable)
 		ret = regulator_enable(vbus_reg);
 		if (ret) {
 			pr_err("typec_force_host: failed to enable vbus regulator: %d\n", ret);
-			return ret;
+		} else {
+			pr_info("typec_force_host: regulator enabled, is_enabled=%d\n",
+				regulator_is_enabled(vbus_reg));
 		}
+		set_vbus_gpio(1);
 
 		msleep(100);
 
@@ -58,6 +73,8 @@ static int force_host_mode(bool enable)
 		force_host_active = true;
 	} else {
 		pr_info("typec_force_host: disabling host mode\n");
+
+		set_vbus_gpio(0);
 
 		ret = extcon_set_state_sync(typec_extcon, EXTCON_USB_HOST, false);
 		if (ret)
@@ -197,6 +214,24 @@ static int __init typec_force_host_init(void)
 	}
 
 	pr_info("typec_force_host: loaded.\n");
+
+	/* Look up VBUS GPIO from regulator DT node (belt and suspenders) */
+	{
+		struct device_node *np;
+		for_each_compatible_node(np, NULL, "regulator-fixed") {
+			const char *name;
+			if (of_property_read_string(np, "regulator-name", &name) == 0 &&
+			    strcmp(name, "vbus_5vout") == 0) {
+				int gpio = of_get_named_gpio(np, "gpio", 0);
+				if (gpio_is_valid(gpio)) {
+					vbus_gpio = gpio;
+					pr_info("typec_force_host: found vbus GPIO %d\n", gpio);
+				}
+				of_node_put(np);
+				break;
+			}
+		}
+	}
 	pr_info("  force_host:     echo 1 > /sys/kernel/typec_force_host/force_host\n");
 	pr_info("  force_data_host: echo 1 > /sys/kernel/typec_force_host/force_data_host\n");
 	return 0;
@@ -216,6 +251,8 @@ static void __exit typec_force_host_exit(void)
 
 	if (typec_extcon)
 		extcon_set_state_sync(typec_extcon, EXTCON_USB_HOST, false);
+
+	set_vbus_gpio(0);
 
 	pr_info("typec_force_host: unloaded\n");
 }
