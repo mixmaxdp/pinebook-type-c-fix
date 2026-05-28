@@ -6,13 +6,9 @@
 #include <linux/sysfs.h>
 #include <linux/extcon.h>
 #include <linux/extcon-provider.h>
-#include <linux/regulator/consumer.h>
-#include <linux/delay.h>
 #include <linux/of_gpio.h>
-#include <linux/gpio/consumer.h>
 
 static struct extcon_dev *typec_extcon;
-static struct regulator *vbus_reg;
 static struct kobject *typec_kobj;
 static bool force_host_active;
 static bool force_data_host_active;
@@ -39,34 +35,15 @@ static int force_host_mode(bool enable)
 		}
 	}
 
-	if (!vbus_reg) {
-		vbus_reg = regulator_get(NULL, "vbus_5vout");
-		if (IS_ERR(vbus_reg)) {
-			pr_err("typec_force_host: failed to get vbus_5vout regulator: %ld\n",
-			       PTR_ERR(vbus_reg));
-			vbus_reg = NULL;
-			return PTR_ERR(vbus_reg);
-		}
-	}
-
 	if (enable) {
 		pr_info("typec_force_host: enabling host mode\n");
 
-		ret = regulator_enable(vbus_reg);
-		if (ret) {
-			pr_err("typec_force_host: failed to enable vbus regulator: %d\n", ret);
-		} else {
-			pr_info("typec_force_host: regulator enabled, is_enabled=%d\n",
-				regulator_is_enabled(vbus_reg));
-		}
 		set_vbus_gpio(1);
-
-		msleep(100);
 
 		ret = extcon_set_state_sync(typec_extcon, EXTCON_USB_HOST, true);
 		if (ret) {
 			pr_err("typec_force_host: failed to set EXTCON_USB_HOST: %d\n", ret);
-			regulator_disable(vbus_reg);
+			set_vbus_gpio(0);
 			return ret;
 		}
 
@@ -79,12 +56,6 @@ static int force_host_mode(bool enable)
 		ret = extcon_set_state_sync(typec_extcon, EXTCON_USB_HOST, false);
 		if (ret)
 			pr_warn("typec_force_host: failed to clear EXTCON_USB_HOST: %d\n", ret);
-
-		if (vbus_reg && regulator_is_enabled(vbus_reg)) {
-			ret = regulator_disable(vbus_reg);
-			if (ret)
-				pr_warn("typec_force_host: failed to disable vbus: %d\n", ret);
-		}
 
 		force_host_active = false;
 		force_data_host_active = false;
@@ -193,29 +164,20 @@ static int __init typec_force_host_init(void)
 	if (!typec_extcon)
 		pr_warn("typec_force_host: typec-extcon not available yet, will retry on write\n");
 
-	vbus_reg = regulator_get(NULL, "vbus_5vout");
-	if (IS_ERR(vbus_reg)) {
-		pr_warn("typec_force_host: vbus_5vout unavailable: %ld\n", PTR_ERR(vbus_reg));
-		vbus_reg = NULL;
-	}
-
 	typec_kobj = kobject_create_and_add("typec_force_host", kernel_kobj);
 	if (!typec_kobj) {
 		pr_err("typec_force_host: failed to create sysfs entry\n");
-		ret = -ENOMEM;
-		goto err_reg;
+		return -ENOMEM;
 	}
 
 	ret = sysfs_create_group(typec_kobj, &attr_group);
 	if (ret) {
 		pr_err("typec_force_host: failed to create sysfs group: %d\n", ret);
 		kobject_put(typec_kobj);
-		goto err_reg;
+		return ret;
 	}
 
-	pr_info("typec_force_host: loaded.\n");
-
-	/* Look up VBUS GPIO from regulator DT node (belt and suspenders) */
+	/* Look up VBUS GPIO from vbus_5vout regulator DT node */
 	{
 		struct device_node *np;
 		for_each_compatible_node(np, NULL, "regulator-fixed") {
@@ -232,20 +194,13 @@ static int __init typec_force_host_init(void)
 			}
 		}
 	}
-	pr_info("  force_host:     echo 1 > /sys/kernel/typec_force_host/force_host\n");
-	pr_info("  force_data_host: echo 1 > /sys/kernel/typec_force_host/force_data_host\n");
-	return 0;
 
-err_reg:
-	if (vbus_reg)
-		regulator_put(vbus_reg);
-	return ret;
+	pr_info("typec_force_host: loaded.\n");
+	return 0;
 }
 
 static void __exit typec_force_host_exit(void)
 {
-	if (vbus_reg)
-		regulator_put(vbus_reg);
 	sysfs_remove_group(typec_kobj, &attr_group);
 	kobject_put(typec_kobj);
 
