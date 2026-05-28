@@ -13,7 +13,7 @@ TYPEC_MODE="$TYPEC_PORT/power_operation_mode"
 
 POLL_INTERVAL=2
 PROBE_DELAY=3
-PROBE_HOLD=2
+PROBE_HOLD=4
 PROBE_RETRY=10
 
 USB_C_CONTROLLER="fe800000.usb"
@@ -99,7 +99,19 @@ disable_host() {
 probe_for_devices() {
     is_charger_connected && return 1
     enable_host
-    sleep "$PROBE_HOLD"
+
+    # Wait for DWC3 xHCI bus to register (can take several seconds)
+    local waited=0
+    while [ $waited -lt $PROBE_HOLD ]; do
+        if [ -n "$(get_usbc_bus_num)" ]; then
+            break
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+
+    # Give devices time to enumerate if bus appeared
+    [ -n "$(get_usbc_bus_num)" ] && sleep 1
 
     if has_external_usb_device && ! is_charger_connected; then
         log "device detected, keeping host mode"
