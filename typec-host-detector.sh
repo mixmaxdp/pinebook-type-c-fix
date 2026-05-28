@@ -5,8 +5,6 @@
 #   - A USB device is detected on the USB-C bus
 # Automatically disables host mode when PD activity resumes (charger or dock).
 
-set -e
-
 MODULE_PATH="/usr/local/lib/typec-force-host/typec_force_host.ko"
 FORCE_HOST="/sys/kernel/typec_force_host/force_host"
 FORCE_DATA_HOST="/sys/kernel/typec_force_host/force_data_host"
@@ -89,7 +87,9 @@ disable_host() {
         local cur_h cur_dh
         cur_h=$(cat "$FORCE_HOST" 2>/dev/null || echo "0")
         cur_dh=$(cat "$FORCE_DATA_HOST" 2>/dev/null || echo "0")
-        [ "$cur_h" = "0" ] && [ "$cur_dh" = "0" ] && return
+        if [ "$cur_h" = "0" ] && [ "$cur_dh" = "0" ]; then
+            return
+        fi
         echo 0 > "$FORCE_HOST" 2>/dev/null
         echo 0 > "$FORCE_DATA_HOST" 2>/dev/null
         log "host mode disabled (extcon + VBUS)"
