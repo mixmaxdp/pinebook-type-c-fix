@@ -20,7 +20,7 @@ PROBE_RETRY=30
 # USB-C DWC3 controller on RK3399
 USB_C_CONTROLLER="fe800000.usb"
 
-# Find which bus number corresponds to the USB-C controller
+# Find which bus number corresponds to the USB-C controller (called fresh each time)
 get_usbc_bus_num() {
     for d in /sys/bus/usb/devices/usb[0-9]*; do
         local target
@@ -31,8 +31,6 @@ get_usbc_bus_num() {
     done
     echo ""
 }
-
-USB_C_BUS=$(get_usbc_bus_num)
 
 log() {
     logger -t "typec-host-detector" "$@"
@@ -61,9 +59,10 @@ is_charger_connected() {
 }
 
 get_device_set() {
-    [ -z "$USB_C_BUS" ] && return
-    local bus_pad
-    bus_pad=$(printf "%03d" "$USB_C_BUS")
+    local bus bus_pad
+    bus=$(get_usbc_bus_num)
+    [ -z "$bus" ] && return
+    bus_pad=$(printf "%03d" "$bus")
     lsusb 2>/dev/null | grep "^Bus $bus_pad " | grep -v "Linux Foundation\|root hub" | awk '{print $6}' | sort -u || true
 }
 
