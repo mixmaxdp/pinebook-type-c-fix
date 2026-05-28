@@ -1,0 +1,14 @@
+[Unit]
+Description=USB-C Host Detector - auto switch Pinebook Pro USB-C to host for CC-less accessories
+After=multi-user.target
+StartLimitIntervalSec=30
+
+[Service]
+Type=simple
+ExecStart=/usr/local/lib/typec-host-detector.sh
+Restart=on-failure
+RestartSec=5
+Nice=10
+
+[Install]
+WantedBy=multi-user.target
