@@ -70,10 +70,13 @@ journalctl -u typec-host-detector -f
 Install with `sudo bash install.sh`. The service:
 
 - Monitors `power_operation_mode` on the Type-C port
+- Scopes USB device detection to the `fe800000.usb` bus (USB-C only, ignores USB-A devices)
+- Computes bus number dynamically each check (handles HCD registration after role switches)
+- Tracks baseline devices at startup; only newly appeared devices on the USB-C bus are considered "external"
 - When a charger is detected (CC negotiation) → disables host mode
 - When charger is removed → waits 3s, probes host mode for 4s
 - If a USB device appears → keeps host mode on
-- If no device found → disables host, retries every 30s
+- If no device found → disables host immediately, retries every 10s
 - If charger reconnected at any point → immediately disables host
 
 ## Rebuilding After Kernel Update
