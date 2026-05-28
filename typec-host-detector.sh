@@ -1,14 +1,15 @@
 #!/bin/bash
 # USB-C Host Detector for Pinebook Pro
 # Automatically switches USB-C port to host mode when:
-#   - No charger is detected on CC lines
-#   - A USB device might be connected (CC-less accessory like Jabra headset)
-# Automatically disables host mode when charger is plugged in.
+#   - No PD activity on CC lines (CC-less accessory like Jabra headset)
+#   - A USB device is detected on the USB-C bus
+# Automatically disables host mode when PD activity resumes (charger or dock).
 
 set -e
 
 MODULE_PATH="/usr/local/lib/typec-force-host/typec_force_host.ko"
 FORCE_HOST="/sys/kernel/typec_force_host/force_host"
+FORCE_DATA_HOST="/sys/kernel/typec_force_host/force_data_host"
 TYPEC_PORT="/sys/bus/i2c/devices/4-0022/typec/port0"
 TYPEC_MODE="$TYPEC_PORT/power_operation_mode"
 
@@ -17,10 +18,8 @@ PROBE_DELAY=3
 PROBE_HOLD=2
 PROBE_RETRY=10
 
-# USB-C DWC3 controller on RK3399
 USB_C_CONTROLLER="fe800000.usb"
 
-# Find which bus number corresponds to the USB-C controller (called fresh each time)
 get_usbc_bus_num() {
     for d in /sys/bus/usb/devices/usb[0-9]*; do
         local target
@@ -66,7 +65,6 @@ get_device_set() {
     lsusb 2>/dev/null | grep "^Bus $bus_pad " | grep -v "Linux Foundation\|root hub" | awk '{print $6}' | sort -u || true
 }
 
-# Baseline captured at startup — devices present before any host mode probing
 BASELINE_DEVICES=$(get_device_set)
 
 has_external_usb_device() {
@@ -80,23 +78,26 @@ has_external_usb_device() {
 }
 
 enable_host() {
-    if module_loaded; then
+    if module_loaded && [ "$(cat $FORCE_HOST 2>/dev/null)" != "1" ]; then
         echo 1 > "$FORCE_HOST" 2>/dev/null
-        log "host mode enabled"
+        log "host mode enabled (VBUS + extcon)"
     fi
 }
 
 disable_host() {
     if module_loaded; then
+        local cur_h cur_dh
+        cur_h=$(cat "$FORCE_HOST" 2>/dev/null || echo "0")
+        cur_dh=$(cat "$FORCE_DATA_HOST" 2>/dev/null || echo "0")
+        [ "$cur_h" = "0" ] && [ "$cur_dh" = "0" ] && return
         echo 0 > "$FORCE_HOST" 2>/dev/null
-        log "host mode disabled"
+        echo 0 > "$FORCE_DATA_HOST" 2>/dev/null
+        log "host mode disabled (extcon + VBUS)"
     fi
 }
 
 probe_for_devices() {
-    # Don't probe if a charger appeared since the last check
     is_charger_connected && return 1
-    # Briefly enable host mode to check if a device is connected
     enable_host
     sleep "$PROBE_HOLD"
 
@@ -104,7 +105,6 @@ probe_for_devices() {
         log "device detected, keeping host mode"
         return 0
     else
-        # If charger connected during probe, disable immediately
         if is_charger_connected; then
             disable_host
             return 1
@@ -115,10 +115,8 @@ probe_for_devices() {
     fi
 }
 
-# Load module at start
 load_module || log "module not available, continuing without"
 
-# State tracking
 last_charger="unknown"
 last_device_check=0
 now=0
@@ -130,33 +128,23 @@ while true; do
     charger=$(is_charger_connected && echo "yes" || echo "no")
 
     if [ "$charger" = "yes" ]; then
-        # Charger connected → disable host, let normal CC charging work
-        if [ "$last_charger" != "yes" ]; then
-            log "charger detected (mode: $(cat $TYPEC_MODE 2>/dev/null))"
-        fi
+        [ "$last_charger" != "yes" ] && log "PD source detected (mode: $(cat $TYPEC_MODE 2>/dev/null))"
         disable_host
         last_charger="yes"
     else
-        # No charger detected on CC
         if [ "$last_charger" = "yes" ]; then
-            # Charger was just disconnected → probe after a delay
             log "charger disconnected, probing for devices in ${PROBE_DELAY}s"
             sleep "$PROBE_DELAY"
-            # Re-check charger during the delay
             if ! is_charger_connected; then
                 probe_for_devices
             fi
         elif [ "$last_charger" = "no" ]; then
-            # No charger, check existing state
             if has_external_usb_device && module_loaded; then
-                # Device already present → keep host mode
                 if [ "$(cat $FORCE_HOST 2>/dev/null)" != "1" ]; then
                     enable_host
                 fi
             else
-                # No device present → disable host mode if active
                 disable_host
-                # Check if it's time to retry
                 elapsed=$(( now - last_device_check ))
                 if [ $elapsed -ge $PROBE_RETRY ]; then
                     probe_for_devices || true
@@ -164,7 +152,6 @@ while true; do
                 fi
             fi
         else
-            # First run: probe after a delay
             sleep "$PROBE_DELAY"
             if ! is_charger_connected; then
                 probe_for_devices

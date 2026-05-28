@@ -12,6 +12,8 @@
 static struct extcon_dev *typec_extcon;
 static struct regulator *vbus_reg;
 static struct kobject *typec_kobj;
+static bool force_host_active;
+static bool force_data_host_active;
 
 static int force_host_mode(bool enable)
 {
@@ -53,7 +55,7 @@ static int force_host_mode(bool enable)
 			return ret;
 		}
 
-		pr_info("typec_force_host: host mode enabled\n");
+		force_host_active = true;
 	} else {
 		pr_info("typec_force_host: disabling host mode\n");
 
@@ -67,7 +69,40 @@ static int force_host_mode(bool enable)
 				pr_warn("typec_force_host: failed to disable vbus: %d\n", ret);
 		}
 
-		pr_info("typec_force_host: host mode disabled\n");
+		force_host_active = false;
+		force_data_host_active = false;
+	}
+
+	return 0;
+}
+
+static int force_data_host_mode(bool enable)
+{
+	int ret;
+
+	if (!typec_extcon) {
+		typec_extcon = extcon_get_extcon_dev("typec-extcon");
+		if (!typec_extcon) {
+			pr_err("typec_force_host: failed to find typec-extcon\n");
+			return -ENODEV;
+		}
+	}
+
+	if (enable) {
+		pr_info("typec_force_host: enabling data host mode (no VBUS)\n");
+		ret = extcon_set_state_sync(typec_extcon, EXTCON_USB_HOST, true);
+		if (ret) {
+			pr_err("typec_force_host: failed to set EXTCON_USB_HOST: %d\n", ret);
+			return ret;
+		}
+		force_data_host_active = true;
+	} else {
+		pr_info("typec_force_host: disabling data host mode\n");
+		ret = extcon_set_state_sync(typec_extcon, EXTCON_USB_HOST, false);
+		if (ret)
+			pr_warn("typec_force_host: failed to clear EXTCON_USB_HOST: %d\n", ret);
+		force_data_host_active = false;
+		force_host_active = false;
 	}
 
 	return 0;
@@ -76,7 +111,7 @@ static int force_host_mode(bool enable)
 static ssize_t force_host_show(struct kobject *kobj,
 			       struct kobj_attribute *attr, char *buf)
 {
-	return sysfs_emit(buf, "Write 1 to force host mode, 0 to disable\n");
+	return sysfs_emit(buf, "%d\n", force_host_active ? 1 : 0);
 }
 
 static ssize_t force_host_store(struct kobject *kobj,
@@ -98,8 +133,34 @@ static ssize_t force_host_store(struct kobject *kobj,
 
 static struct kobj_attribute force_host_attr = __ATTR_RW(force_host);
 
+static ssize_t force_data_host_show(struct kobject *kobj,
+				    struct kobj_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf, "%d\n", force_data_host_active ? 1 : 0);
+}
+
+static ssize_t force_data_host_store(struct kobject *kobj,
+				     struct kobj_attribute *attr,
+				     const char *buf, size_t count)
+{
+	int val, ret;
+
+	ret = kstrtoint(buf, 0, &val);
+	if (ret)
+		return ret;
+
+	ret = force_data_host_mode(val ? true : false);
+	if (ret)
+		return ret;
+
+	return count;
+}
+
+static struct kobj_attribute force_data_host_attr = __ATTR_RW(force_data_host);
+
 static struct attribute *attrs[] = {
 	&force_host_attr.attr,
+	&force_data_host_attr.attr,
 	NULL,
 };
 
@@ -135,7 +196,9 @@ static int __init typec_force_host_init(void)
 		goto err_reg;
 	}
 
-	pr_info("typec_force_host: loaded. Use: echo 1 > /sys/kernel/typec_force_host/force_host\n");
+	pr_info("typec_force_host: loaded.\n");
+	pr_info("  force_host:     echo 1 > /sys/kernel/typec_force_host/force_host\n");
+	pr_info("  force_data_host: echo 1 > /sys/kernel/typec_force_host/force_data_host\n");
 	return 0;
 
 err_reg:

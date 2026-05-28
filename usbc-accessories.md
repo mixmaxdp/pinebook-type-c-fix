@@ -1,14 +1,19 @@
 # USB-C Accessory Detection on Pinebook Pro
 
-This project fixes USB-C accessory detection on the Pinebook Pro for devices that don't implement USB-C CC pull-down resistors (e.g., Jabra EVOLVE 20 headset).
+Fixes USB-C accessory detection on the Pinebook Pro for devices that lack CC
+pull-down resistors (e.g., Jabra EVOLVE 20 headset).
 
-## How It Works
+## Problem
 
-The Pinebook Pro's USB-C port uses a FUSB302 controller for Type-C connection detection via CC (Configuration Channel) pins. Devices that don't pull CC lines down are invisible to this controller — they receive no VBUS and are never enumerated.
+The Pinebook Pro's FUSB302 TCPM detects connection via CC voltage. Devices
+without Rd pull-downs (or Rp pull-ups) are invisible — they receive no VBUS and
+are never enumerated. This affects headsets, simple adapters, and some USB-C
+flash drives that don't implement the full Type-C spec.
 
-This project provides:
-1. A **kernel module** (`typec_force_host`) that bypasses CC detection and directly enables VBUS + host mode
-2. A **systemd service** that automatically switches between charger and device modes
+Additionally, the PBP uses `dr_mode = "otg"` on the DWC3 controller with
+`extcon = <&typec_extcon>`, so the DWC3 role follows the extcon state set by the
+FUSB302 driver. When the TCPM sees no CC termination, it never sets
+EXTCON_USB_HOST, and DWC3 stays in peripheral mode — no VBUS, no enumeration.
 
 ## Architecture
 
@@ -17,18 +22,10 @@ USB-C Connector
     │
     ├── CC lines ──→ FUSB302 (I2C)
     │                    │
-    │                    ├── TCPM (Type-C Port Manager)
-    │                    │     └── /sys/class/typec/port0/
-    │                    │
-    │                    ├── Type-C class → typec-extcon bridge
-    │                    │     ├── extcon1         ← USB-HOST cable
-    │                    │     ├── usb_role switch
-    │                    │     └── typec_mux
-    │                    │
-    │                    └── vbus_5vout regulator (GPIO)
+    │                    └── TCPM: sets EXTCON_USB_HOST, controls vbus_5vout
     │
     ├── D+/D- ──→ USB 2.0 PHY
-    └── SS ──→ USB 3.0 PHY / DP alt mode
+    └── SS ──→ USB 3.0 PHY / DP alt mode (CDN-DP)
 
 DWC3 USB Controller
     ├── dr_mode = "otg"
@@ -36,15 +33,74 @@ DWC3 USB Controller
     └── phys = <&u2phy1_otg &tcphy0_usb3>
 ```
 
-## Files
+## Solution
 
-| File | Purpose |
-|---|---|
-| `typec_force_host.c` | Kernel module source |
-| `Makefile` | Module build file |
-| `typec-host-detector.sh` | Background auto-detection script |
-| `typec-host-detector.service` | Systemd unit |
-| `install.sh` | Build & install script |
+A kernel module + userspace daemon that bypasses CC detection:
+
+1. **Kernel module** (`typec_force_host.ko`): writes to the typec-extcon and
+   controls the VBUS regulator directly, decoupled from the TCPM.
+2. **Systemd service** (`typec-host-detector.sh`): polls the port state and
+   automatically enables/disables host mode based on PD activity.
+
+### Kernel Module: Sysfs Interface
+
+All controls under `/sys/kernel/typec_force_host/`:
+
+| File | Purpose | Readback |
+|------|---------|----------|
+| `force_host` | Enable VBUS regulator + set EXTCON_USB_HOST | `1` or `0` |
+| `force_data_host` | Set EXTCON_USB_HOST only (no VBUS) | `1` or `0` |
+
+### Detection Script: State Machine
+
+```
+                    ┌──────────┐
+     PD on CC ──────→│  CHARGER │←────── PD off
+                    │  (sink)  │
+                    └────┬─────┘
+                         │ PD off
+                         v
+                    ┌──────────┐
+                    │  PROBE   │── wait 3s after PD off ──→ enable VBUS + extcon for 2s
+                    └────┬─────┘
+                         │
+                    ┌────┴─────┐
+                    v          v
+               ┌────────┐  ┌────────┐
+               │ DEVICE │  │  IDLE  │
+               │ found  │  │ no dev │
+               └────────┘  └────┬───┘
+                                │ retry after 10s
+                                v
+                           ┌────────┐
+                           │ PROBE  │
+                           └────────┘
+```
+
+Any PD activity returns to CHARGER state immediately.
+
+## Dock Analysis
+
+A USB-C dock that provides PD power cannot be used with the PBP as USB host for
+port expansion, due to a fundamental VBUS conflict:
+
+- The dock is the PD **Source**: it provides 5V+ on VBUS
+- To make the PBP a USB **host**, DWC3 must be in host mode (EXTCON_USB_HOST)
+  and must control VBUS to power downstream devices
+- If VBUS regulator is OFF → DWC3 can't power the bus → `Cannot enable` errors
+- If VBUS regulator is ON → PBP sources its own 5V on VBUS, colliding with the
+  dock's 5V → potential short / undefined behavior
+
+There is no safe way for the PBP to simultaneously sink power from a PD source
+and source its own VBUS on the same port.
+
+However, the PBP works normally as a USB **device** with PD sources:
+- Charging works (sink power)
+- DP alt mode works (external monitor via dock's HDMI/DP)
+- The dock provides USB data (Ethernet, audio, storage) to the PBP as a USB
+  compound device
+- Devices plugged into the dock's downstream ports are managed by the dock's own
+  USB host controller, not the PBP's DWC3
 
 ## Manual Usage
 
@@ -52,10 +108,13 @@ DWC3 USB Controller
 # Load module
 sudo insmod /usr/local/lib/typec-force-host/typec_force_host.ko
 
-# Force host mode
+# Force full host mode (VBUS + extcon) — use for CC-less devices
 echo 1 | sudo tee /sys/kernel/typec_force_host/force_host
 
-# Restore normal mode (e.g., before plugging a charger)
+# Data-only host mode (extcon, no VBUS) — not generally useful alone
+echo 1 | sudo tee /sys/kernel/typec_force_host/force_data_host
+
+# Restore normal mode
 echo 0 | sudo tee /sys/kernel/typec_force_host/force_host
 
 # Check service status
@@ -65,19 +124,18 @@ systemctl status typec-host-detector
 journalctl -u typec-host-detector -f
 ```
 
-## Automatic Detection
-
-Install with `sudo bash install.sh`. The service:
+## Service Behavior
 
 - Monitors `power_operation_mode` on the Type-C port
-- Scopes USB device detection to the `fe800000.usb` bus (USB-C only, ignores USB-A devices)
-- Computes bus number dynamically each check (handles HCD registration after role switches)
-- Tracks baseline devices at startup; only newly appeared devices on the USB-C bus are considered "external"
-- When a charger is detected (CC negotiation) → disables host mode
-- When charger is removed → waits 3s, probes host mode for 4s
-- If a USB device appears → keeps host mode on
-- If no device found → disables host immediately, retries every 10s
-- If charger reconnected at any point → immediately disables host
+- Scopes USB device detection to the USB-C DWC3 bus (ignores USB-A ports)
+- Computes bus number dynamically (handles HCD registration timing)
+- Tracks baseline devices at startup; only *new* devices on the USB-C bus are
+  considered external
+- PD active → disables host mode (clears extcon + VBUS regulator)
+- PD removed → waits 3s, probes host mode for 2s
+- Device appears → keeps host mode
+- No device → disables host, retries every 10s
+- PD reconnected at any point → immediately disables host
 
 ## Rebuilding After Kernel Update
 
@@ -87,3 +145,22 @@ make
 sudo cp typec_force_host.ko /usr/local/lib/typec-force-host/
 sudo systemctl restart typec-host-detector
 ```
+
+## Hardware Notes
+
+- **FUSB302** at I2C address 0x22 on the RK3399's I2C4 bus, driven by `typec_fusb302`
+- **DWC3** at address fe800000 on RK3399, `dr_mode = "otg"`, extcon = typec-extcon
+- **VBUS regulator** `vbus_5vout` is a GPIO-controlled regulator (active high)
+- **CDN-DP** handles DP alt mode routing; unaffected by the module
+- **Charging limitation**: PBP uses a linear charger (RK808 PMIC) with a single
+  5V/2.5A sink PDO — hardware-limited to 5V input regardless of PD negotiation
+
+## Files
+
+| File | Purpose |
+|------|---------|
+| `typec_force_host.c` | Kernel module source |
+| `Makefile` | Module build file |
+| `typec-host-detector.sh` | Background auto-detection script |
+| `typec-host-detector.service` | Systemd unit |
+| `install.sh` | Build & install script |
